@@ -1,0 +1,78 @@
+```{r ui page}
+
+ui<-navbarPage("App Title",
+  tabPanel("Plot",
+      sidebarLayout(   
+          sidebarPanel(
+           fluidRow(selectInput("RegionSelect",label=h5("Select Region"),
+                        choices=c("Corp Shared Services","Ambulatory Services","Central",
+                                       "Post Acute Services","Eastern","Western"))),
+           fluidRow(uiOutput(outputId="JobFunctionDropdown")),
+           fluidRow(uiOutput(outputId="JobFamilyDropdown")),
+           fluidRow(selectInput("DetailLevel",label=h5("Select Detail Level"),
+                          choices=c("Department","Employee","Managers","BU/SL"))),
+           fluidRow(selectInput("Measurement",label=h5("Select Measurement"),
+                          choices=c("ManagerLevel","Betweenness","DeptID","BU.SL","Closeness","Custom"))),   
+           fluidRow(sliderInput("Minweight",label="Select Minimum Threshold",
+                          min=1,max=100,step=5,value=5)),
+            fluidRow(selectInput("ClusterNum",label="Select Cluster",
+                          choices=c("All","Cluster 1","Cluster 2"))),          
+           width=3),#sidebarpanel     
+           
+           mainPanel(
+             tabsetPanel(
+               tabPanel("Plot",forceNetworkOutput("Plot1", width="130%",height="700px")),
+               tabPanel("Table",tableOutput("Table1"))
+               
+             ), #tabset Panel
+           ) #main panel
+        ) #sidebar w main  
+     ),#Outer tab panel 1
+  
+  navbarMenu("More",
+    tabPanel("Summary"),
+    "----",
+    "Section header",
+    tabPanel("Table")
+  )
+)
+
+
+```
+
+
+```{r}
+server<-function(input,output){
+
+#Dynamic Function Dropdown  
+output$JobFunctionDropdown<-renderUI({
+  JobFunctionList=c(unique(JFF_File[Region==input$RegionSelect,"JobFunction"])) 
+  selectInput("JobFunctionSelect",label=h5("Select Job Function"),choices=JobFunctionList,multiple=TRUE)
+})
+
+#Dynamic Family Dropdown
+output$JobFamilyDropdown<-renderUI({
+  JFF_Filetemp=JFF_File[Region==input$RegionSelect,]
+  JobFamilyList=c(JFF_Filetemp[JobFunction %in% input$JobFunctionSelect,"JobFamily"]) 
+  selectInput("JobFamilyselect",label=h5("Select Job Family"),choices=JobFamilyList, multiple=TRUE)
+})
+
+
+data1<-reactive({filterD3(Demomerged,input$RegionSelect,input$JobFamilyselect,input$DetailLevel,input$Minweight)})
+
+data2<-reactive({clusterD3(data1(),input$ClusterNum)})
+                
+output$Plot1<-renderForceNetwork(graphD3(data2(),input$Measurement,input$Minweight)[[1]])
+  
+output$Table1<-renderTable({graphD3(data2(),input$Measurement,input$Minweight)[[2]]},
+                           spacing='xs', striped=TRUE, hover=TRUE, bordered=TRUE, align='l')
+
+}
+```
+
+
+```{r}
+shinyApp(ui,server)
+
+
+```
