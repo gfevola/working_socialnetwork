@@ -1,0 +1,254 @@
+
+```{r}
+
+#Correlation
+
+Insight_Correlation<-function(Demomerged.F,minlink,asPct){
+  df.nodes<-makenodes(Demomerged.F,detail)%>%
+          makeMeasurements(df.links)
+
+  df.links<-makelinks(Demomerged.F,minlink,asPct)
+
+
+  #Correlation
+  df.nodes$Engagement[df.nodes$Engagement==0]<-NA #to ignore rows w no eng. score 
+
+  mat.x<-as.matrix(df.nodes[,c("TeamMembers","ManagerLevel", "Betweenness","Closeness","Eigen_centrality","Page.rank")])
+  mat.y<-as.matrix(df.nodes[,"Engagement"])
+
+  c<-cor(cbind(mat.x,mat.y),method="pearson",use='complete.obs')%>%
+        melt()%>%
+        data.table()
+  c$Var1<-as.character(c$Var1)
+  c$Var2<-as.character(c$Var2)
+
+  
+  ###Meaningful results, no duplicates
+  c<-c[abs(value)>.3 & Var1 > Var2]
+  if (nrow(c)>0){
+    
+    stringout<-sapply(1:nrow(c),function(w){
+    if (c[w,3]>0){
+        return(paste("When ",c[w,1]," increases, ",c[w,2]," increases, (",round(c[w,3],2),")",sep=""))
+     } else {
+        return(paste("When ",c[w,1]," increases, ",c[w,2]," decreases, (",round(c[w,3],2),")",sep="")) 
+      }
+    })
+    
+    return(data.table(Note=c(stringout,"Ignores Groups without Engagement score.")))
+  } else {
+    return(data.table(Note="No Correlation Insights."))
+  }
+
+}
+
+```
+
+
+```{r}
+
+#identify communities
+
+#identify links that cause isolated groups
+Insight_AdjoiningLinks<-function(Demomerged.F,minlink,asPct){
+  df.links<-makelinks(Demomerged.F,minlink,asPct) #call function to make links 
+  df.links<-df.links[df.links$Sender!=df.links$Recipient,]
+  df.links$Sender<-as.character(df.links$Sender)
+  df.links$Recipient<-as.character(df.links$Recipient) 
+
+ x<-unlist(sapply(1:nrow(df.links),function(r){
+   snd=unlist(df.links[r,"Sender"])
+   rcp=unlist(df.links[r,"Recipient"])
+
+   oneout<-df.links[(df.links$Sender!=snd | df.links$Recipient!=rcp) & (df.links$Sender!=rcp | df.links$Recipient!=snd),]
+   gnet<-graph.data.frame(oneout,directed=FALSE)%>%
+        set_edge_attr("weight",value=oneout$Count)%>%
+        igraph::simplify(remove.multiple = FALSE,remove.loops = TRUE)
+  
+   g2<-distances(gnet)
+   g2[is.infinite(g2)]<--1 #-1 = unrelated
+   g2[g2>0]<-0 #0 = related
+   g2<-unique(g2)
+  
+   return(c(df.links[r,"Sender"],df.links[r,"Recipient"],nrow(g2)))
+ }))
+
+ x1<-data.frame(matrix(x,ncol=3,byrow = TRUE))
+ x1$X3<-as.numeric(as.character(x1$X3))
+ x2<-x1[x1$X3>min(x1$X3),]
+
+ names(x2)<-c("Group1","Group2","Total Divisions")
+return(x2)
+}
+
+
+```
+
+
+
+```{r Ego Network}
+
+EmployeeName<-"Hutchins,Christopher J"
+extended<-FALSE
+
+EgoEmpD3<-function(Query_data_unique,DemoClean,Demomerged, EmployeeName,minlink,asPct,extended=TRUE){
+
+   
+ DemoClean$Level<-0
+ solarsystem<-DemoClean[Name == EmployeeName]
+
+ if (extended==TRUE){
+   DemoClean$Level<-DemoClean$Level+1
+   solarsystem<-rbind(solarsystem,DemoClean[DeptID==solarsystem$DeptID & Emplid!=solarsystem$Emplid])
+ } 
+
+ 
+#Determine contacts
+for (i in 1:2){
+  DemoClean$Level<-DemoClean$Level+1
+  contacts.Senders<-Query_data_unique[FM_NM %in% solarsystem$Email,list(sum(n)),by=list(TO_NM)]
+  contacts.Recips<-Query_data_unique[TO_NM %in% solarsystem$Email,list(sum(n)),by=list(FM_NM)] 
+  contacts<-unique(data.table(rbind(contacts.Senders,contacts.Recips,use.names=FALSE)))
+  names(contacts)<-c("Email","n")
+  contacts<-contacts[!Email %in% solarsystem$Email,]
+
+  contacts<-contacts[order(-n),]%>%
+              group_by(Email)%>%
+              transmute(sum=sum(n))%>%
+              unique()
+
+  contacts.top<-head(unique(contacts),30)
+  
+  solarsystem<-rbind(solarsystem,DemoClean[Email %in% contacts.top$Email])
+
+}
+
+#prepare demomerged file
+Demomerged.E<-Demomerged[Emplid %in% solarsystem$Emplid]
+count.dups=Demomerged.E%>%
+          group_by(Key)%>%
+          count()
+
+Demomerged.E<-merge(Demomerged.E,count.dups[count.dups$n==2,],by.x="Key",by.y="Key")%>%
+                data.table()
+Demomerged.E$GroupName<-Demomerged.E$Name
+Demomerged.E<-merge(Demomerged.E,solarsystem[,c("Emplid","Level")],by.x="Emplid",by.y="Emplid")
+
+#Call Graphing Function (step 3)
+g<-graphD3(Demomerged.E,"Level","Employee",minlink,asPct)
+g1<-graphstats(Demomerged.E,minlink,asPct)
+
+return(g)
+
+}
+
+#gg<-EgoEmpD3(Query_data_unique,DemoClean,Demomerged,"Hutchins,Christopher J",5,FALSE,TRUE)
+    
+```
+
+
+```{r compare different timeframes by link coloration}
+
+printTimeframeCompare<-function(Demomerged, region,Job.Family, IsRegion, detail, minlink, asPct,
+                                  begDate1, endDate1, begDate2, endDate2,Normalize=TRUE){
+
+  #minlinks where either timeframe - OR criteria 
+  gmeasure<-"ManagerLevel"
+  
+  require(colorspace)
+  
+    Demomerged.timeframe1<-filterD3(Demomerged,region,Job.Family,IsRegion,detail,minlink,asPct,begDate1,endDate1)
+    Demomerged.timeframe2<-filterD3(Demomerged,region,Job.Family,IsRegion,detail,minlink,asPct,begDate2,endDate2)
+  
+    
+    Demomerged.timeframe1<-select(Demomerged.timeframe1,-c("Region","DeptID"))
+    Demomerged.timeframe2<-select(Demomerged.timeframe2,-c("Region","DeptID"))  
+    Demomerged.timeframeM<-rbind(Demomerged.timeframe1,Demomerged.timeframe2)
+ 
+  
+  #Re-factor GroupName to join with df.linksM
+  Demomerged.timeframeM$GroupName<-as.factor(Demomerged.timeframeM$GroupName)
+  SndInt<-unique(data.frame(GroupName=Demomerged.timeframeM$GroupName,
+                            Sender1=as.numeric(Demomerged.timeframeM$GroupName)))
+  RcpInt<-unique(data.frame(GroupName=Demomerged.timeframeM$GroupName,
+                            Recipient1=as.numeric(Demomerged.timeframeM$GroupName))) 
+  
+  
+  #-------links - all, averaged later
+   df.links1<-makelinks(Demomerged.timeframe1,1,asPct)
+   df.links1$Timeframe<-1
+   df.links2<-makelinks(Demomerged.timeframe2,1,asPct)
+   df.links2$Timeframe<-2
+
+  df.linksM<-rbind(df.links1,df.links2)%>%
+            select(-c(Sender1,Recipient1))%>%
+            merge(SndInt,by.x="Sender",by.y="GroupName")%>%
+            merge(RcpInt,by.x="Recipient",by.y="GroupName")
+ 
+   df.linksM<-dcast(Sender+Recipient ~ Timeframe,data=df.linksM,value.var="Count")
+   df.linksM[is.na(df.linksM)]<-0
+   
+   if (Normalize==TRUE){  #pct of count pertaining to timeframe 1
+        d1=df.linksM$`1`/mean(df.linksM$`1`)
+        d2=df.linksM$`2`/mean(df.linksM$`2`)
+        df.linksM$Count<-d1/(d1+d2)
+        df.linksM$Count1<-df.linksM$`2`/(df.linksM$`1`+df.linksM$`2`)
+   } else {
+       df.linksM$Count<-df.linksM$`2`/(df.linksM$`1`+df.linksM$`2`)
+   }
+ #---------------
+ 
+ #Make Nodes
+ df.nodesM<-makenodes(Demomerged.timeframeM,detail)
+ 
+ 
+  #Add measurements
+ df.nodesM<-makeMeasurements(df.nodesM,df.linksM)
+
+ #---color scheme---
+ colorstring<-colorScheme(df.nodesM,gmeasure)
+
+ #reorder nodes for plot since ID is based on order
+ df.nodesM<-df.nodesM[order(GroupName.Num),]
+
+ noderef <- data.frame(GroupName=df.nodesM$GroupName,ID=(as.integer(rownames(df.nodesM))-1))
+ 
+  df.linksM<-merge(df.linksM,noderef,by.x="Sender",by.y="GroupName")
+  df.linksM<-merge(df.linksM,noderef,by.x="Recipient",by.y="GroupName")
+  names(df.linksM)[names(df.linksM)=="ID.x"]<-"Sender1"
+  names(df.linksM)[names(df.linksM)=="ID.y"]<-"Recipient1"
+
+  df.linksM<-df.linksM[(df.linksM$`1`>=minlink) | (df.linksM$`2`>=minlink),]   #either surpasses minlink
+
+#Link Color: color1 = more occurring in timeframe 1
+linkcolors<-map(df.linksM$Count,
+                ~switch(as.numeric(.x<.5)+1,hex(mixcolor(.x,RGB(0,0,1),RGB(0,0,0))),
+                                            hex(mixcolor(.x,RGB(0,0,0),RGB(1,0,0)))
+                        ))
+
+
+  #create graph element
+ p<-forceNetwork(Links=data.frame(df.linksM),Nodes=df.nodesM,Source="Recipient1",Target="Sender1",Value="Count",
+             NodeID="Name",Nodesize = "TeamMembers",Group=gmeasure, zoom=TRUE,
+             #linkWidth = JS(paste("function(d) { return d.value*10 - ",minlink,"; }"),sep=""),
+             linkWidth = 2,
+             linkColour = unlist(linkcolors), fontSize=12,
+             colourScale = colorstring,
+             #arrows=TRUE,
+             radiusCalculation = "Math.sqrt(d.nodesize)+6",
+             charge= max(-8 * nrow(df.linksM)/sqrt(nrow(df.nodesM)) - 30,-140),
+             opacityNoHover=1
+         )
+ 
+ links<-merge(df.linksM,select(DemoClean,Emplid,Name),by.x="Recipient",by.y="Emplid",all.x=TRUE)%>%
+          merge(select(DemoClean,Emplid,Name),by.x="Sender",by.y="Emplid",all.x=TRUE,suffix=c("Recipient","Sender"))%>%
+          select(-c("Sender1","Recipient1"))
+
+ 
+ return(list(p,links,df.nodesM,linkcolors))
+
+}
+  
+
+```
+
