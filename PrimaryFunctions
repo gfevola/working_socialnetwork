@@ -1,0 +1,428 @@
+---
+title: "Primary Functions"
+---
+
+```{r - example debugging parameters }
+
+Job.Family<-"Finance"
+region<-"Eastern"
+gmeasure<-"DeptName"
+detail<-"Employee"
+minlink<-8
+asPct<-FALSE
+IsRegion<-1
+beginDate<-as.Date("2019-05-01")
+endDate<-as.Date("2019-05-31")
+
+```
+
+
+```{r step 1: filter data}
+
+filterD3<-function(Demomerged,region,Job.Family,IsRegion,detail="Department",minlink,asPct,beginDate=NULL,endDate=NULL){  
+ 
+options(warn=0)
+
+  bDate<-as.POSIXct.Date(beginDate,tryFormats="%Y-%m-%d")
+  eDate<-as.POSIXct.Date(endDate,tryFormats="%Y-%m-%d")
+  
+#Filter TimeFrame
+if (is.null(bDate)==FALSE & is.null(eDate)==FALSE){
+    Demomerged.F<-data.table(Demomerged[Demomerged$Date>=bDate & Demomerged$Date <=eDate,])
+} else {
+  Demomerged.F<-data.table(Demomerged)
+}  
+ 
+#Filter Job Family, Region
+if (region!="All") {
+    Demomerged.F<-Demomerged.F[switch(as.numeric(IsRegion),Region,BU.SL) %in% region,]
+  } else { 
+    Demomerged.F<-Demomerged.F
+  }
+
+if (Job.Family!="All"){
+  Demomerged.F<-Demomerged.F[JobFamily %in% Job.Family]
+} else {
+  Demomerged.F<-select(Demomerged.F,-c(JobFunction,JobFamily))
+}
+
+if(nrow(Demomerged.F)==0){return(0)}
+#special parameters
+if (detail=="Department"){
+   Demomerged.F$GroupName<-as.character(Demomerged.F$DeptID)
+   Demomerged.F$Name<-as.character(Demomerged.F$DeptName)
+} else if (detail=="BU/SL"){
+   Demomerged.F$GroupName<-as.character(Demomerged.F$BU.SL)
+   Demomerged.F$DeptName<-"N/A" #prevent dept duplication
+} else {
+   Demomerged.F$GroupName<-as.character(Demomerged.F$Emplid)
+}
+
+if (detail=="Managers"){
+  Demomerged.F<-Demomerged.F[ManagerLevel>1,]
+}
+
+count.dups=Demomerged.F%>%
+          group_by(Key)%>%
+          count()
+
+Demomerged.F<-merge(Demomerged.F,count.dups[count.dups$n==2,],by.x="Key",by.y="Key")
+
+#Demomerged.F<-AddClusterNames(Demomerged.F,minlink,asPct)  #for debugging
+#Demomerged.F<-Demomerged.F[Cluster=="Cluster 1"]
+
+return(Demomerged.F)
+
+}
+```
+
+
+```{r step 1.5: populate cluster names in app}
+
+cnames<-function(Demomerged.F){
+  clust=unique(as.character(Demomerged.F$Cluster))
+  return(clust[order(clust)])
+  
+}
+
+```
+
+
+```{r step 2: filter by cluster}
+
+clusterD3<-function(Demomerged.F,clustName){
+  
+  if (clustName!="All"){
+    Demomerged.F<-Demomerged.F[Cluster==clustName]
+  }
+  return(Demomerged.F)
+}
+```
+
+
+
+```{r step 3: create plot (outside function)}
+
+graphD3<-function(Demomerged.F,gmeasure,detail,minlink=1,asPct=FALSE){  
+
+ if(nrow(Demomerged.F)==0){return(list(plot(0,0),data.frame(ErrNote="No Data Returned")))}  
+  
+  if (Demomerged.F$GroupName[1]==Demomerged.F$DeptName[1]){
+      #Demomerged.F$GroupName<-factor(paste(Demomerged.F$GroupName,Demomerged.F$DeptID,sep="-")) 
+      Demomerged.F$GroupName<-factor(Demomerged.F$GroupName) 
+      Demomerged.F$Engagement<-1
+      
+  } else {Demomerged.F$GroupName<-factor(Demomerged.F$GroupName)}
+  
+  Demomerged.F<-select(Demomerged.F,-c("Region","DeptID"))
+  
+ 
+ #Create Links (function)
+ df.links<-makelinks(Demomerged.F,minlink,asPct)
+
+ #Create Nodes (function)
+ df.nodes<-makenodes(Demomerged.F,detail)
+
+ #Add measurements
+ df.nodes<-makeMeasurements(df.nodes,df.links)
+
+ 
+ #---color scheme---
+ colorstring<-colorScheme(df.nodes,gmeasure,87)
+
+ #reorder nodes for plot since ID is based on order
+ df.nodes<-df.nodes[order(GroupName.Num),]
+
+ #create graph element
+ p<-forceNetwork(Links=data.frame(df.links),Nodes=df.nodes,Source="Recipient1",Target="Sender1",Value="Count",
+             NodeID="Name",Nodesize = "TeamMembers",Group=gmeasure, zoom=TRUE,
+             linkWidth = JS(paste("function(d) { return Math.sqrt(d.value)/2 - ",minlink,"; }"),sep=""),
+             linkColour = "black", fontSize=12,
+             colourScale = colorstring,
+             #arrows=TRUE,
+             radiusCalculation = "Math.sqrt(d.nodesize)+6",
+             charge= max(-8 * nrow(df.links)/sqrt(nrow(df.nodes)) - 30,-140),
+             opacityNoHover=1
+         )
+    
+
+ df.nodes<-select(df.nodes,-c("n"))
+
+return(list(p,df.nodes,df.links))
+#return(df.nodes)
+}
+
+```
+
+
+
+```{r Create Links Data Table}
+
+makelinks<-function(Demomerged.F,minlink,asPct=FALSE,averageCounts=TRUE){
+  #create links table
+
+  df.links<-data.table(merge(Demomerged.F[Sender.Recipient=="FM_NM",c("Key","GroupName")],
+                 Demomerged.F[Sender.Recipient=="TO_NM",c("Key","GroupName","Count")],
+                  by.x="Key",by.y="Key"))
+  names(df.links)<-c("Key","Sender","Recipient","Count")
+  df.links<-df.links[,list(Count=sum(Count)),by=c("Sender","Recipient")]
+
+  
+  df.links$Sender1<-as.numeric(df.links$Sender)-1 #-Zero-index-
+  df.links$Recipient1<-as.numeric(df.links$Recipient)-1 #-Zero-index-
+
+  #######
+  if (averageCounts==TRUE){ 
+     union<-data.table(rbind(cbind(as.character(df.links$Sender),as.character(df.links$Recipient),
+                                    df.links$Sender1,df.links$Recipient1,df.links$Count),
+                            cbind(as.character(df.links$Recipient),as.character(df.links$Sender),
+                                    df.links$Recipient1,df.links$Sender1,df.links$Count)))
+     
+     names(union)<-c("Sender","Recipient","Sender1","Recipient1","Count")
+     
+     df.links<-union[,list(Count=mean(as.numeric(Count))),by=list(Sender,Recipient,Sender1,Recipient1)]
+     
+     #remove duplicate rows by sender/recip pair
+     df.links<-df.links[as.character(df.links$Sender)<as.character(df.links$Recipient),]
+     
+     
+  } 
+  ######
+  
+  #filter by min interactions
+  if (asPct==TRUE){
+      df.links<-df.links%>%
+              group_by(Sender)%>%
+              mutate(SenderTotal=sum(Count))%>%
+              group_by(Recipient)%>%
+              mutate(RecipTotal=sum(Count))
+      
+      df.links$Count<-round(df.links$Count/(df.links$SenderTotal+df.links$RecipTotal)*200,0)
+      
+  } else { #emails/week
+    #days = length(unique(Demomerged.F$Date)) 
+    days=as.numeric(max(Demomerged.F$Date) - min(Demomerged.F$Date))
+     df.links$Count<-df.links$Count/(days/7)
+  }
+  
+  
+  df.links<-df.links[df.links$Count>=minlink,]
+  return(df.links) 
+}
+```
+
+
+```{r}
+makelinks_week<-function(Demomerged.F,minlink,asPct=FALSE,averageCounts=FALSE){
+  
+  df.links<-data.table(merge(Demomerged.F[Sender.Recipient=="FM_NM",c("Key","GroupName","Week")],
+                 Demomerged.F[Sender.Recipient=="TO_NM",c("Key","GroupName","Count","Week")],
+                  by.x=c("Key","Week"),by.y=c("Key","Week"))    )
+
+  names(df.links)<-c("Key","Week","Sender","Recipient","Count")
+  df.links<-df.links[,list(Count=sum(Count)),by=c("Sender","Recipient","Week")]
+  
+  df.links$Sender1<-as.numeric(df.links$Sender)-1 #-Zero-index-
+  df.links$Recipient1<-as.numeric(df.links$Recipient)-1 #-Zero-index-
+  
+    if (averageCounts==TRUE){ 
+     union<-data.table(rbind(cbind(as.character(df.links$Sender),as.character(df.links$Recipient),
+                                    df.links$Sender1,df.links$Recipient1,df.links$Week,df.links$Count),
+                            cbind(as.character(df.links$Recipient),as.character(df.links$Sender),
+                                    df.links$Recipient1,df.links$Sender1,df.links$Week,df.links$Count)))
+     
+     names(union)<-c("Sender","Recipient","Sender1","Recipient1","Count")
+     
+     df.links<-union[,list(Count=mean(as.numeric(Count))),by=list(Sender,Recipient,Week,Sender1,Recipient1)]
+    } 
+  
+  #filter by min interactions
+  if (asPct==TRUE){
+      df.links<-df.links%>%
+              group_by(Sender,Week)%>%
+              mutate(SenderTotal=sum(Count))%>%
+              group_by(Recipient,Week)%>%
+              mutate(RecipTotal=sum(Count))
+      
+      df.links$Count<-round(df.links$Count/(df.links$SenderTotal+df.links$RecipTotal)*200,0)
+      
+  }
+  
+ df.links<-df.links[df.links$Count>=minlink,]  
+ return(df.links) 
+}  
+     
+```
+
+```{r}
+
+makenodes<-function(Demomerged.F,detail){
+ 
+  nlist<-names(Demomerged.F)[!names(Demomerged.F) %in% c("Count","Date","Key","Sender.Recipient")]
+  glist<-c("ManagerLevel","Engagement","Custom","Salary","EmailCount","Email","Emplid","ManagerID","ManagerName")
+ 
+
+  Nodes<-Demomerged.F[,list(EmailCount=sum(Count)/2),by=nlist]
+  #remove dups
+  dups<-duplicated(Nodes$GroupName)
+  Nodes<-Nodes[!dups,]
+  
+  hlist<-names(Nodes)[!names(Nodes) %in% glist]
+  
+  if (detail == "Department") {hlist<-hlist[!hlist %in%
+                                              c("BU.SL","Engagement","Custom","TeamMembers","JobCode")]}
+
+  
+  df.nodes<-Nodes[order(GroupName),list(ManagerLevel=mean(ManagerLevel),Engagement=mean(Engagement),
+                                          Custom=mean(Custom),TeamMembers=.N),by=hlist]
+    
+  df.nodes$GroupName.Num<-as.numeric(df.nodes$GroupName)-1 #-Zero-index-
+
+return(df.nodes)
+
+}
+
+```
+
+
+```{r Add measurements by creating igraph object}
+
+makeMeasurements<-function(df.nodes,df.links){
+  if (nrow(df.links) > 0) {
+    
+    ymat<-dcast(Sender ~ Recipient,data=df.links,value.var="Count")
+    ymat[is.na(ymat)]<-0
+    rownames(ymat)<-ymat$Sender
+    ymat<-ymat[rownames(ymat) %in% colnames(ymat),]
+    #ymat<-ymat[,colnames(ymat) %in% rownames(ymat)]
+  
+    #gmat<-network(ymat,directed=FALSE)
+  
+    gnet<-graph.data.frame(df.links,directed=FALSE)%>%
+          set_edge_attr("weight",value=df.links$Count+1)%>%
+          igraph::simplify(remove.multiple = FALSE,remove.loops = TRUE)
+
+      #add community
+      if (length(unique(df.nodes$Cluster))==1){
+        sc<-spinglass.community(gnet)
+        mem<-data.frame(Names=sc$names,Community=sc$membership)
+        df.nodes<-merge(df.nodes,mem,by.x="GroupName",by.y="Names",all.x=TRUE)
+      } else {
+        #not connected, give all the same community value
+        df.nodes$Community<-1
+      }
+  }
+ 
+  for (x in c("eigen_centrality","page.rank","betweenness","closeness")){
+    df.nodes<-addNodeValue(df.nodes,gnet,match.fun(x),x)  #calls sub-function
+  }
+
+  
+df.nodes[is.na(df.nodes)]<- 0
+return(df.nodes)
+}
+
+```
+
+
+```{r add column to nodes based on function name}
+  #subfunction to makeMeasurements 
+addNodeValue<-function(df.nodes,gnet,varfunction,colname){
+
+
+   if(colname %in% c("eigen_centrality","page.rank")){
+      cl<-data.frame(Variable = round(varfunction(gnet)[[1]],3))
+     } else {
+      cl<-data.frame(Variable = round(varfunction(gnet),3)) 
+     }
+  
+   names(cl)[names(cl)== "Variable"]<- paste0(toupper(substr(colname, 1, 1)), tolower(substring(colname, 2)))
+   cl$DName<-rownames(cl)
+   df.nodes<-merge(df.nodes,cl,by.x="GroupName",by.y="DName",all.x=TRUE)
+
+   return(df.nodes)
+}
+
+
+```
+
+
+
+```{r decompose into clusters}
+
+#Function 1, analyze clusters to filter, add to merged data frame
+
+AddClusterNames<-function(Demomerged.F,minlink,asPct){
+  
+  Demomerged.F$GroupName<-factor(Demomerged.F$GroupName) #Convert to factor
+
+  df.links<-makelinks(Demomerged.F,minlink,asPct) #call function to make links 
+  df.links<-df.links[df.links$Sender!=df.links$Recipient,]
+
+  gnet<-graph.data.frame(df.links,directed=FALSE)%>%
+        set_edge_attr("weight",value=df.links$Count)%>%
+        igraph::simplify(remove.multiple = FALSE,remove.loops = TRUE)
+
+  g2<-distances(gnet)
+  g2[is.infinite(g2)]<--1 #-1 = unrelated
+  g2[g2>0]<-0 #0 = related
+  g2<-unique(g2)
+
+  if(nrow(g2)>0){
+      if (nrow(g2)>1){
+        g2<-as.matrix(g2[order(-apply(g2,1,sum)),])
+        } #solitary line for multiple clusters
+      
+      rownames(g2)<-paste("Cluster",seq(1,nrow(g2)))
+      g2<-melt(g2)
+      names(g2)<-c("Cluster","GroupName","N")
+      g2<-g2[g2$N==0,]
+      g2<-select(g2,-N)
+      g2$GroupName<-as.character(g2$GroupName)
+      Demomerged.F<-merge(Demomerged.F,g2,by.x="GroupName",by.y="GroupName",all.x=TRUE)
+    } else {
+      Demomerged.F$Cluster<-"N/A"     
+    }
+  
+Demomerged.F$Cluster<-forcats::fct_explicit_na(Demomerged.F$Cluster,na_level="NA")
+    
+return(Demomerged.F)
+}
+
+
+```
+
+
+
+```{r coloring function}
+
+colorScheme<-function(df.nodes,gmeasure,seed=7){
+  
+  set.seed(seed)
+  
+   if(gmeasure!="DeptName" & gmeasure!="BU.SL" & gmeasure!="Community" & gmeasure!="Max.Topic" & gmeasure!="JobCode"){   #indeterminate number of groups
+    cmin<-min(select(df.nodes,gmeasure))
+    cmax<-max(select(df.nodes,gmeasure))
+
+    uvals=select(df.nodes,gmeasure)
+      colors<-'"#000000","#39d0ae"'
+      #scaletype="scaleOrdinal()"
+      scaletype="scaleLinear()"
+    
+   # colorstring<-paste('d3.',scaletype,'.domain([',paste(unlist(uvals),collapse=","),']).
+  #                   range([',colors,'])',sep='')
+ colorstring<-paste('d3.',scaletype,'.domain([0,',max(uvals),']).range([',colors,'])',sep='')
+      
+      
+  } else {
+    n1=length(unique(df.nodes$GroupName))  
+    brews= as.hexmode(unlist(round(runif(n1,min=0,max=16000000),0)))
+    brewstring=paste0("'", paste(brews, collapse = "', '"), "'")
+    colorstring<-JS(paste0('d3.scaleOrdinal().domain([0,',n1, ']).range([', brewstring, '])'))
+}
+return(colorstring)
+}
+```
+
+
+
